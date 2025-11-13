@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Conversational IVR Simulator</title>
+  <style>
+    /* Minimal styling - keep the original look but compacted */
+    body { font-family: Inter, system-ui, sans-serif; background: #0f172a; color: #e6eef8; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;}
+    .card { width:380px; background:linear-gradient(180deg,#071033,#0b1b3a); padding:18px;border-radius:14px; box-shadow:0 10px 30px rgba(2,6,23,.6);}
+    .header { text-align:center; margin-bottom:10px;}
+    .caller { font-weight:600; color:#9be7d5;}
+    #ivrOutput { background: rgba(255,255,255,0.02); padding:12px; border-radius:8px; height:170px; overflow:auto; margin-bottom:10px; }
+    .controls { display:flex; gap:8px; justify-content:center; }
+    button { padding:10px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:600; }
+    .btn-start { background:#4ade80; color:#052e16; }
+    .btn-hang { background:#fb7185; color:white; }
+    .btn-listen { background:#60a5fa; color:white; }
+    .keypad { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; justify-items:center; }
+    .key { width:62px; height:62px; background:rgba(255,255,255,0.03); display:flex; align-items:center; justify-content:center; border-radius:50%; font-size:18px; color:#e6eef8; cursor:pointer; }
+    .small { font-size:12px; color:#9fb3c8; text-align:center; margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div style="font-size:18px;">Conversational IVR Simulator</div>
+      <div class="caller" id="callerNumber">+91 1395984358</div>
+    </div>
+
+    <div id="ivrOutput">
+      <p style="opacity:.7">Press START to create a call session. You can then press LISTEN and speak to the IVR.</p>
+    </div>
+
+    <div class="controls">
+      <button id="btnStart" class="btn-start">Start Call</button>
+      <button id="btnListen" class="btn-listen" disabled>🎙️ Listen</button>
+      <button id="btnHang" class="btn-hang" disabled>End Call</button>
+    </div>
+
+    <div class="keypad" id="keypad" style="margin-top:12px; opacity:.5; pointer-events:none;">
+      <div class="key" data-key="1">1</div>
+      <div class="key" data-key="2">2</div>
+      <div class="key" data-key="3">3</div>
+      <div class="key" data-key="4">4</div>
+      <div class="key" data-key="5">5</div>
+      <div class="key" data-key="6">6</div>
+      <div class="key" data-key="7">7</div>
+      <div class="key" data-key="8">8</div>
+      <div class="key" data-key="9">9</div>
+      <div class="key" data-key="*">*</div>
+      <div class="key" data-key="0">0</div>
+      <div class="key" data-key="#">#</div>
+    </div>
+
+    <div class="small">Tip: Use LISTEN (Speech Recognition) to speak natural requests like "book a ticket" or "pnr 123456".</div>
+  </div>
+
+<script>
+  const API_BASE = "http://localhost:8000";
+  let callId = null;
+  let callActive = false;
+  let recognition = null;
+  let listening = false;
+
+  const out = document.getElementById("ivrOutput");
+  const btnStart = document.getElementById("btnStart");
+  const btnListen = document.getElementById("btnListen");
+  const btnHang = document.getElementById("btnHang");
+  const keypad = document.getElementById("keypad");
+
+  function addLine(text, opts = {}) {
+    const p = document.createElement("p");
+    p.textContent = text;
+    if (opts.meta) p.style.color = "#9be7d5";
+    if (opts.error) p.style.color = "#fb7185";
+    out.appendChild(p);
+    out.scrollTop = out.scrollHeight;
+  }
+
+  function speakText(text) {
+    if (!("speechSynthesis" in window)) {
+      addLine("[TTS not supported in this browser]", { error: true });
+      return;
+    }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-IN";
+    u.rate = 1;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }
+
+  async function startCall() {
+    try {
+      const res = await fetch(API_BASE + "/ivr/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ caller_number: document.getElementById("callerNumber").textContent })
+      });
+      const data = await res.json();
+      callId = data.call_id;
+      callActive = true;
+      addLine("Call connected — call_id: " + callId, { meta: true });
+      addLine("IVR: " + data.prompt);
+      speakText(data.prompt);
+      btnListen.disabled = false;
+      btnHang.disabled = false;
+      btnStart.disabled = true;
+      keypad.style.opacity = "1";
+      keypad.style.pointerEvents = "auto";
+    } catch (e) {
+      addLine("Failed to start call: " + e.message, { error: true });
+    }
+  }
+
+  async function endCall() {
+    if (!callId) return;
+    await fetch(API_BASE + "/ivr/end?call_id=" + encodeURIComponent(callId), { method: "POST" }).catch(()=>{});
+    addLine("Call ended.", { meta: true });
+    callId = null;
+    callActive = false;
+    btnListen.disabled = true;
+    btnHang.disabled = true;
+    btnStart.disabled = false;
+    keypad.style.opacity = ".5";
+    keypad.style.pointerEvents = "none";
+    if (recognition) {
+      try { recognition.stop(); } catch(e) {}
+      listening = false;
+      btnListen.textContent = "🎙️ Listen";
+    }
+  }
+
+  async function sendConversation(text) {
+    if (!callActive) {
+      addLine("Start a call first.", { error: true });
+      return;
+    }
+    addLine("You: " + text, { meta: true });
+    // send to /ivr/conversation
+    try {
+      const res = await fetch(API_BASE + "/ivr/conversation", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ input_text: text, call_id: callId })
+      });
+      const data = await res.json();
+      addLine("IVR: " + data.message);
+      speakText(data.message);
+    } catch (e) {
+      addLine("Error contacting backend: " + e.message, { error: true });
+    }
+  }
+
+  async function sendDTMF(digit) {
+    if (!callActive) {
+      addLine("Start a call first.", { error: true });
+      return;
+    }
+    addLine("[DTMF] You pressed: " + digit, { meta: true });
+    try {
+      const payload = { call_id: callId, digit: digit, current_menu: "main" };
+      const res = await fetch(API_BASE + "/ivr/dtmf", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.message) {
+        addLine("IVR: " + data.message);
+        speakText(data.message);
+      }
+    } catch (e) {
+      addLine("DTMF error: " + e.message, { error: true });
+    }
+  }
+
+  // Keypad clicks
+  document.querySelectorAll(".key").forEach(k => {
+    k.addEventListener("click", () => {
+      const key = k.getAttribute("data-key");
+      sendDTMF(key);
+    });
+  });
+
+  // Start / end buttons
+  btnStart.addEventListener("click", startCall);
+  btnHang.addEventListener("click", endCall);
+
+  // Speech recognition setup (with graceful fallback)
+  function setupRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      addLine("Speech Recognition not supported in this browser. Try Chrome/Edge.", { error: true });
+      btnListen.disabled = true;
+      return null;
+    }
+    recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      listening = true;
+      btnListen.textContent = "Listening... Click to stop";
+      addLine("[Listening...]");
+    };
+    recognition.onend = () => {
+      listening = false;
+      btnListen.textContent = "🎙️ Listen";
+    };
+    recognition.onerror = (ev) => {
+      addLine("Recognition error: " + ev.error, { error: true });
+      listening = false;
+      btnListen.textContent = "🎙️ Listen";
+    };
+    recognition.onresult = (ev) => {
+      const text = ev.results[0][0].transcript;
+      sendConversation(text);
+    };
+    return recognition;
+  }
+
+  // Listen button toggles recognition
+  btnListen.addEventListener("click", () => {
+    if (!recognition) {
+      recognition = setupRecognition();
+      if (!recognition) return;
+    }
+    if (!callActive) {
+      addLine("Start a call before using speech recognition.", { error: true });
+      return;
+    }
+    if (listening) {
+      recognition.stop();
+      listening = false;
+      btnListen.textContent = "🎙️ Listen";
+    } else {
+      try {
+        recognition.start();
+      } catch (e) {
+        // sometimes start throws if called too quickly - ignore
+      }
+    }
+  });
+
+  // Initialize: noop
+  addLine("Ready. Click Start to create a call session.");
+</script>
+</body>
+</html>
